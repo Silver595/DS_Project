@@ -1,0 +1,14 @@
+streamlit
+pandas
+numpy>=1.26.0
+scikit-learn
+matplotlib
+seaborn
+plotly
+imbalanced-learn
+xgboost
+openpyxl
+fpdf
+Pillow
+streamlit-option-menu
+scipy

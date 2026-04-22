@@ -1,0 +1,8 @@
+{
+    "accuracies": {
+        "diabetes": 0.926,
+        "heart_disease": 0.934,
+        "hypertension": 0.953,
+        "stroke": 0.924
+    }
+}
