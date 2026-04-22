@@ -5,6 +5,8 @@ Northeast India Community Health Monitoring
 COMPLETE VERSION WITH ALL FEATURES
 """
 
+import os
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -97,10 +99,190 @@ if "alerts" not in st.session_state:
 
 
 # ============================================================================
+# FEATURE LIST — defined here so training and inference always stay in sync
+# ============================================================================
+WATER_FEATURES = [
+    "state_encoded",
+    "location_type_encoded",
+    "water_source_encoded",
+    "season_encoded",
+    "ph",
+    "turbidity_ntu",
+    "tds_mg_l",
+    "dissolved_oxygen_mg_l",
+    "bod_mg_l",
+    "fecal_coliform_mpn",
+    "total_coliform_mpn",
+    "nitrate_mg_l",
+    "fluoride_mg_l",
+    "chloride_mg_l",
+    "hardness_mg_l",
+    "temperature_c",
+    "arsenic_ug_l",
+    "iron_mg_l",
+    "population_served",
+    "sanitation_access_percent",
+]
+
+# ============================================================================
+# AUTO-TRAIN  — runs once on first deploy, saves models to ./models/
+# ============================================================================
+def train_and_save_models():
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.preprocessing import StandardScaler, LabelEncoder
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+
+    os.makedirs("models", exist_ok=True)
+    np.random.seed(42)
+    n = 6000
+
+    # --- categorical pools ---
+    states       = ["Assam", "Meghalaya", "Tripura", "Nagaland", "Manipur", "Mizoram", "Arunachal Pradesh"]
+    loc_types    = ["Rural", "Urban"]
+    water_srcs   = ["River", "Stream", "Well", "Hand Pump", "Pond", "Spring"]
+    seasons      = ["Monsoon", "Pre-Monsoon", "Post-Monsoon", "Winter"]
+
+    state_arr    = np.random.choice(states, n)
+    loc_arr      = np.random.choice(loc_types, n)
+    source_arr   = np.random.choice(water_srcs, n)
+    season_arr   = np.random.choice(seasons, n)
+
+    # --- fit label encoders on all known categories ---
+    encoders = {}
+    for name, pool in [("state", states), ("location_type", loc_types),
+                       ("water_source", water_srcs), ("season", seasons)]:
+        le = LabelEncoder()
+        le.fit(pool)
+        encoders[name] = le
+
+    # --- numeric water-quality parameters ---
+    ph           = np.random.uniform(5.0, 9.0, n)
+    turbidity    = np.random.uniform(0.0, 120.0, n)
+    tds          = np.random.uniform(50.0, 1200.0, n)
+    do_          = np.random.uniform(1.0, 12.0, n)
+    bod          = np.random.uniform(0.5, 18.0, n)
+    fecal        = np.random.uniform(0.0, 800.0, n)
+    total_col    = np.random.uniform(0.0, 2000.0, n)
+    nitrate      = np.random.uniform(0.0, 60.0, n)
+    fluoride     = np.random.uniform(0.0, 3.5, n)
+    chloride     = np.random.uniform(5.0, 220.0, n)
+    hardness     = np.random.uniform(15.0, 280.0, n)
+    temp         = np.random.uniform(14.0, 33.0, n)
+    arsenic      = np.random.uniform(0.0, 150.0, n)
+    iron         = np.random.uniform(0.0, 4.0, n)
+    population   = np.random.choice([50, 100, 200, 500, 1000, 2000], n).astype(float)
+    sanitation   = np.random.uniform(0.0, 100.0, n)
+
+    X = pd.DataFrame({
+        "state_encoded":           encoders["state"].transform(state_arr),
+        "location_type_encoded":   encoders["location_type"].transform(loc_arr),
+        "water_source_encoded":    encoders["water_source"].transform(source_arr),
+        "season_encoded":          encoders["season"].transform(season_arr),
+        "ph":                      ph,
+        "turbidity_ntu":           turbidity,
+        "tds_mg_l":                tds,
+        "dissolved_oxygen_mg_l":   do_,
+        "bod_mg_l":                bod,
+        "fecal_coliform_mpn":      fecal,
+        "total_coliform_mpn":      total_col,
+        "nitrate_mg_l":            nitrate,
+        "fluoride_mg_l":           fluoride,
+        "chloride_mg_l":           chloride,
+        "hardness_mg_l":           hardness,
+        "temperature_c":           temp,
+        "arsenic_ug_l":            arsenic,
+        "iron_mg_l":               iron,
+        "population_served":       population,
+        "sanitation_access_percent": sanitation,
+    })[WATER_FEATURES]
+
+    # --- disease-specific label functions (clinically inspired) ---
+    is_monsoon   = (season_arr == "Monsoon").astype(int)
+    is_rural     = (loc_arr == "Rural").astype(int)
+
+    disease_labels = {
+        "cholera": (
+            (fecal > 100).astype(int) |
+            ((turbidity > 30) & is_monsoon).astype(int) |
+            ((sanitation < 30) & is_rural).astype(int)
+        ).clip(0, 1),
+        "typhoid": (
+            (fecal > 50).astype(int) |
+            (total_col > 500).astype(int) |
+            ((tds > 600) & (sanitation < 40)).astype(int)
+        ).clip(0, 1),
+        "dysentery": (
+            (fecal > 30).astype(int) |
+            ((turbidity > 20) & (bod > 8)).astype(int) |
+            ((do_ < 3) & is_monsoon).astype(int)
+        ).clip(0, 1),
+        "hepatitis_a": (
+            (fecal > 20).astype(int) |
+            ((ph < 6.0) | (ph > 9.0)).astype(int) |
+            ((iron > 2.0) & (turbidity > 15)).astype(int)
+        ).clip(0, 1),
+    }
+    # overall = high risk if ANY disease is high
+    disease_labels["overall"] = np.clip(
+        sum(disease_labels[d] for d in ["cholera", "typhoid", "dysentery", "hepatitis_a"]), 0, 1
+    )
+
+    results = []
+    diseases = ["cholera", "typhoid", "dysentery", "hepatitis_a", "overall"]
+
+    for disease in diseases:
+        y = disease_labels[disease]
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        scaler = StandardScaler()
+        X_tr_s = scaler.fit_transform(X_tr)
+        X_te_s = scaler.transform(X_te)
+
+        model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+        model.fit(X_tr_s, y_tr)
+        y_pred = model.predict(X_te_s)
+        y_prob = model.predict_proba(X_te_s)[:, 1]
+
+        results.append({
+            "Disease": disease.replace("_", " ").title(),
+            "Accuracy":  accuracy_score(y_te, y_pred),
+            "Precision": precision_score(y_te, y_pred, zero_division=0),
+            "Recall":    recall_score(y_te, y_pred, zero_division=0),
+            "F1-Score":  f1_score(y_te, y_pred, zero_division=0),
+            "ROC-AUC":   roc_auc_score(y_te, y_prob),
+        })
+
+        with open(f"models/{disease}_model.pkl", "wb") as f:
+            pickle.dump(model, f)
+        with open(f"models/{disease}_scaler.pkl", "wb") as f:
+            pickle.dump(scaler, f)
+
+    with open("models/feature_names.pkl", "wb") as f:
+        pickle.dump(WATER_FEATURES, f)
+    with open("models/label_encoders.pkl", "wb") as f:
+        pickle.dump(encoders, f)
+
+    metadata = {
+        "model_type": "Random Forest Classifier",
+        "training_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "dataset_size": n,
+        "results": results,
+    }
+    with open("models/metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+
+# ============================================================================
 # LOAD MODELS
 # ============================================================================
 @st.cache_resource
 def load_all_models():
+    # Auto-train on first deploy / fresh clone if models are missing
+    if not os.path.exists("models/cholera_model.pkl"):
+        with st.spinner("🔧 First-time setup: training models... (30–60 sec)"):
+            train_and_save_models()
+
     try:
         diseases = ["cholera", "typhoid", "dysentery", "hepatitis_a", "overall"]
         models = {}
@@ -112,8 +294,8 @@ def load_all_models():
             with open(f"models/{disease}_scaler.pkl", "rb") as f:
                 scalers[disease] = pickle.load(f)
 
-        with open("models/feature_names.pkl", "rb") as f:
-            features = pickle.load(f)
+        # Always use the canonical feature list — never trust a stale pkl
+        features = WATER_FEATURES
 
         with open("models/label_encoders.pkl", "rb") as f:
             encoders = pickle.load(f)
@@ -123,7 +305,7 @@ def load_all_models():
 
         return models, scalers, features, encoders, metadata, True
     except Exception as e:
-        st.error(f"Error loading models: {str(e)}")
+        st.error(f"❌ Error loading models: {e}")
         return None, None, None, None, None, False
 
 
@@ -227,8 +409,7 @@ def main():
     models, scalers, features, encoders, metadata, loaded = load_all_models()
 
     if not loaded:
-        st.error("❌ **Models not found!**")
-        st.info("Please run: `python train_models.py`")
+        st.error("❌ Model loading failed. Check the logs above for details.")
         st.stop()
 
     # Header
