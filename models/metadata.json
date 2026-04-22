@@ -2,7 +2,7 @@
     "project": "Water-Borne Disease Early Warning System",
     "region": "Northeast India",
     "dataset_size": 15000,
-    "training_date": "2026-04-22 15:48:30",
+    "training_date": "2026-04-22 16:09:29",
     "diseases": [
         "cholera",
         "typhoid",

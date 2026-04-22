@@ -4,6 +4,8 @@ Multi-Disease Risk Prediction System
 Shows specific disease predictions: Diabetes, Heart Disease, Hypertension, Stroke
 """
 
+import os
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -55,8 +57,120 @@ if "history" not in st.session_state:
 
 
 # Load models
+# The canonical feature list for all 4 disease models.
+# This is defined here explicitly so the app never depends on a
+# potentially stale / wrong feature_names.pkl from a different project.
+DISEASE_FEATURES = [
+    "age",
+    "gender",
+    "bmi",
+    "blood_pressure",
+    "cholesterol",
+    "blood_sugar",
+    "heart_rate",
+    "smoking",
+    "exercise_hours",
+    "family_history",
+]
+
+
+def train_and_save_models():
+    """
+    Trains all 4 disease models from synthetic data and saves them to ./models/.
+    Called automatically on first run (locally or on Streamlit Cloud) when
+    pre-trained .pkl files are not present in the repo.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import train_test_split
+
+    os.makedirs("models", exist_ok=True)
+    np.random.seed(42)
+    n = 5000
+
+    age          = np.random.randint(20, 90, n)
+    gender       = np.random.randint(0, 2, n)
+    bmi          = np.random.uniform(15, 45, n)
+    blood_pressure = np.random.randint(90, 200, n)
+    cholesterol  = np.random.randint(120, 350, n)
+    blood_sugar  = np.random.randint(70, 250, n)
+    heart_rate   = np.random.randint(50, 120, n)
+    smoking      = np.random.randint(0, 2, n)
+    exercise_hours = np.random.uniform(0, 20, n)
+    family_history = np.random.randint(0, 2, n)
+
+    X = pd.DataFrame({
+        "age": age, "gender": gender, "bmi": bmi,
+        "blood_pressure": blood_pressure, "cholesterol": cholesterol,
+        "blood_sugar": blood_sugar, "heart_rate": heart_rate,
+        "smoking": smoking, "exercise_hours": exercise_hours,
+        "family_history": family_history,
+    })[DISEASE_FEATURES]
+
+    # Clinically-inspired label functions
+    labels = {
+        "diabetes": (
+            (blood_sugar > 140).astype(int) |
+            ((bmi > 30) & (age > 45)).astype(int) |
+            family_history
+        ).clip(0, 1),
+        "heart_disease": (
+            (cholesterol > 240).astype(int) |
+            ((blood_pressure > 140) & (smoking == 1)).astype(int) |
+            ((age > 55) & (gender == 1)).astype(int)
+        ).clip(0, 1),
+        "hypertension": (
+            (blood_pressure > 140).astype(int) |
+            ((bmi > 28) & (age > 40)).astype(int) |
+            (smoking == 1).astype(int)
+        ).clip(0, 1),
+        "stroke": (
+            (blood_pressure > 160).astype(int) |
+            ((age > 65) & (smoking == 1)).astype(int) |
+            ((cholesterol > 260) & (blood_pressure > 150)).astype(int)
+        ).clip(0, 1),
+    }
+
+    accuracies = {}
+    for disease, y in labels.items():
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+        scaler = StandardScaler()
+        X_tr_s = scaler.fit_transform(X_tr)
+        X_te_s = scaler.transform(X_te)
+
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X_tr_s, y_tr)
+        accuracies[disease] = float(model.score(X_te_s, y_te))
+
+        with open(f"models/{disease}_model.pkl", "wb") as f:
+            pickle.dump(model, f)
+        with open(f"models/{disease}_scaler.pkl", "wb") as f:
+            pickle.dump(scaler, f)
+
+    with open("models/feature_names.pkl", "wb") as f:
+        pickle.dump(DISEASE_FEATURES, f)
+
+    metadata = {
+        "accuracies": accuracies,
+        "trained_at": datetime.now().isoformat(),
+        "n_samples": n,
+    }
+    with open("models/multidisease_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+
 @st.cache_resource
 def load_models():
+    """
+    Loads pre-trained models. If they don't exist (first deploy / fresh clone),
+    trains them automatically — no manual step required.
+    """
+    models_missing = not os.path.exists("models/diabetes_model.pkl")
+
+    if models_missing:
+        with st.spinner("🔧 First-time setup: training models... (30–60 sec)"):
+            train_and_save_models()
+
     try:
         diseases = ["diabetes", "heart_disease", "hypertension", "stroke"]
         models = {}
@@ -68,14 +182,13 @@ def load_models():
             with open(f"models/{disease}_scaler.pkl", "rb") as f:
                 scalers[disease] = pickle.load(f)
 
-        with open("models/feature_names.pkl", "rb") as f:
-            features = pickle.load(f)
-
         with open("models/multidisease_metadata.json", "r") as f:
             metadata = json.load(f)
 
-        return models, scalers, features, metadata, True
-    except FileNotFoundError:
+        return models, scalers, DISEASE_FEATURES, metadata, True
+
+    except Exception as e:
+        st.error(f"❌ Failed to load models: {e}")
         return None, None, None, None, False
 
 
@@ -104,8 +217,7 @@ def main():
     models, scalers, features, metadata, loaded = load_models()
 
     if not loaded:
-        st.error("❌ **Models not found!** Run this first:")
-        st.code("python create_and_train_multidisease.py", language="bash")
+        st.error("❌ Model loading failed. Check the logs above for details.")
         st.stop()
 
     # Header
@@ -210,6 +322,8 @@ def show_prediction(models, scalers, features):
         )
 
     if submitted:
+        # Build input with the canonical feature order so column selection
+        # is always consistent, regardless of what feature_names.pkl contains.
         input_data = pd.DataFrame(
             {
                 "age": [age],
@@ -223,7 +337,7 @@ def show_prediction(models, scalers, features):
                 "exercise_hours": [exercise],
                 "family_history": [family_val],
             }
-        )[features]
+        )[DISEASE_FEATURES]
 
         # Predict all diseases
         disease_names = {
